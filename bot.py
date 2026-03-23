@@ -24,12 +24,13 @@ MONGO_URI = os.getenv("MONGO_URI")
 import os
 from pymongo import MongoClient
 
+# MongoDB
 MONGO_URI = os.getenv("MONGO_URI")
 client = MongoClient(MONGO_URI)
-
+db = client["telegram_bot"]  # Database
 users_col = db["users"]
 blocked_col = db["blocked"]
-emails_col = db["allowed_emails"]
+allowed_emails_col = db["allowed_emails"]
 
 
 # ========= UTILS =========
