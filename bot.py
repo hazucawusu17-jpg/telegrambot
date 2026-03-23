@@ -1,3 +1,16 @@
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+def dummy_server():
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"OK")
+    server = HTTPServer(("0.0.0.0", 10000), Handler)
+    server.serve_forever()
+
+threading.Thread(target=dummy_server, daemon=True).start()
 # bot.py
 import os
 import re
