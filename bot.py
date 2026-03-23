@@ -21,8 +21,11 @@ MONGO_URI = os.getenv("MONGO_URI")
 
 # ==========================================
 
-client = MongoClient(mongodb+srv://hazucawusu17_db_user:RDbf7dxgLsh6DuQg@cluster0.ds2ufvy.mongodb.net/?appName=Cluster0)
-db = client["telegram_bot"]
+import os
+from pymongo import MongoClient
+
+MONGO_URI = os.getenv("MONGO_URI")
+client = MongoClient(MONGO_URI)
 
 users_col = db["users"]
 blocked_col = db["blocked"]
