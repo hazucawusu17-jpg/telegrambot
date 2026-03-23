@@ -4,6 +4,9 @@ import re
 import imaplib
 import email
 from email.header import decode_header
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from pymongo import MongoClient
@@ -30,6 +33,21 @@ blocked_col = db["blocked"]
 allowed_emails_col = db["allowed_emails"]
 
 # ----------------------------
+# DUMMY HTTP SERVER (Render free plan)
+# ----------------------------
+def dummy_server():
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"OK")
+    server = HTTPServer(("0.0.0.0", 10000), Handler)
+    server.serve_forever()
+
+# Start dummy server in a separate thread
+threading.Thread(target=dummy_server, daemon=True).start()
+
+# ----------------------------
 # HELPER FUNCTIONS
 # ----------------------------
 async def is_blocked(user_id):
@@ -39,7 +57,6 @@ async def is_allowed_email(email_address):
     return allowed_emails_col.find_one({"email": email_address}) is not None
 
 def extract_text_from_email(msg):
-    """Extract plain text from email message."""
     text = ""
     if msg.is_multipart():
         for part in msg.walk():
@@ -49,18 +66,14 @@ def extract_text_from_email(msg):
                 text += part.get_payload(decode=True).decode(errors="ignore")
     else:
         text = msg.get_payload(decode=True).decode(errors="ignore")
-    # Extract only non-sensitive data (numbers, order IDs, status)
-    # This regex finds words/numbers like "Order #12345", "ID: 9876"
     matches = re.findall(r"(Order\s*#?\d+|ID\s*:? ?\d+|Status\s*:? ?\w+|\d+)", text, re.IGNORECASE)
     return "\n".join(matches) if matches else "No extractable info found."
 
 def get_latest_email(to_email):
-    """Connect to IMAP and get latest email sent to `to_email`."""
     try:
         mail = imaplib.IMAP4_SSL(IMAP_SERVER)
         mail.login(EMAIL_ACCOUNT, EMAIL_PASSWORD)
         mail.select("inbox")
-        # Search last 100 emails
         status, messages = mail.search(None, "ALL")
         mail_ids = messages[0].split()
         for mail_id in reversed(mail_ids[-100:]):
@@ -88,16 +101,13 @@ async def latest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if await is_blocked(user_id):
         return
-
     if len(context.args) != 1:
         await update.message.reply_text("Usage: /latest user@domain.com")
         return
-
     email_address = context.args[0]
     if not await is_allowed_email(email_address):
         await update.message.reply_text("No account found")
         return
-
     await update.message.reply_text("Searching latest email...")
     result = get_latest_email(email_address)
     await update.message.reply_text(result)
