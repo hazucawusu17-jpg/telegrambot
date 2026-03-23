@@ -9,12 +9,15 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 # ================= CONFIG =================
 
-BOT_TOKEN = "8710463357:AAGQYm-kPFTStNQMn8XweVTXqk_E-wsPc5Y"
-ADMIN_ID = 5336264852
+import os
 
-IMAP_SERVER = "imap.gmail.com"
-EMAIL_ACCOUNT = "hazucawusu17@gmail.com"
-EMAIL_PASSWORD = "xjanmupcxfmhkbkb"
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID"))
+
+EMAIL_ACCOUNT = os.getenv("EMAIL_ACCOUNT")
+EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
+
+MONGO_URI = os.getenv("MONGO_URI")
 
 MONGO_URI = "mongodb+srv://user:pass@cluster.mongodb.net/?retryWrites=true&w=majority"
 
