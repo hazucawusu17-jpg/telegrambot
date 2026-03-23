@@ -19,8 +19,6 @@ EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 
 MONGO_URI = os.getenv("MONGO_URI")
 
-MONGO_URI = "mongodb+srv://user:pass@cluster.mongodb.net/?retryWrites=true&w=majority"
-
 # ==========================================
 
 client = MongoClient(mongodb+srv://hazucawusu17_db_user:RDbf7dxgLsh6DuQg@cluster0.ds2ufvy.mongodb.net/?appName=Cluster0)
