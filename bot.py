@@ -1,254 +1,178 @@
+# bot.py
+import os
+import re
 import imaplib
 import email
-import re
 from email.header import decode_header
-
-from pymongo import MongoClient
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from pymongo import MongoClient
 
-# ================= CONFIG =================
-
-import os
-
+# ----------------------------
+# ENVIRONMENT VARIABLES
+# ----------------------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 
 EMAIL_ACCOUNT = os.getenv("EMAIL_ACCOUNT")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
+IMAP_SERVER = "imap.gmail.com"
 
 MONGO_URI = os.getenv("MONGO_URI")
 
-# ==========================================
-
-import os
-from pymongo import MongoClient
-
-# MongoDB
-MONGO_URI = os.getenv("MONGO_URI")
+# ----------------------------
+# MONGODB SETUP
+# ----------------------------
 client = MongoClient(MONGO_URI)
-db = client["telegram_bot"]  # Database
+db = client["telegram_bot"]
 users_col = db["users"]
 blocked_col = db["blocked"]
 allowed_emails_col = db["allowed_emails"]
 
-
-# ========= UTILS =========
-
-def is_admin(user_id):
-    return user_id == ADMIN_ID
-
-
-def is_blocked(user_id):
+# ----------------------------
+# HELPER FUNCTIONS
+# ----------------------------
+async def is_blocked(user_id):
     return blocked_col.find_one({"user_id": user_id}) is not None
 
+async def is_allowed_email(email_address):
+    return allowed_emails_col.find_one({"email": email_address}) is not None
 
-def add_user(user_id):
-    if not users_col.find_one({"user_id": user_id}):
-        users_col.insert_one({"user_id": user_id})
-
-
-def is_email_allowed(email_addr):
-    return emails_col.find_one({"email": email_addr.lower()}) is not None
-
-
-def extract_text(msg):
-    """Extract text from multipart email safely"""
+def extract_text_from_email(msg):
+    """Extract plain text from email message."""
+    text = ""
     if msg.is_multipart():
         for part in msg.walk():
-            content_type = part.get_content_type()
-            if content_type == "text/plain":
-                return part.get_payload(decode=True).decode(errors="ignore")
+            ctype = part.get_content_type()
+            cdispo = str(part.get("Content-Disposition"))
+            if ctype == "text/plain" and "attachment" not in cdispo:
+                text += part.get_payload(decode=True).decode(errors="ignore")
     else:
-        return msg.get_payload(decode=True).decode(errors="ignore")
-    return ""
+        text = msg.get_payload(decode=True).decode(errors="ignore")
+    # Extract only non-sensitive data (numbers, order IDs, status)
+    # This regex finds words/numbers like "Order #12345", "ID: 9876"
+    matches = re.findall(r"(Order\s*#?\d+|ID\s*:? ?\d+|Status\s*:? ?\w+|\d+)", text, re.IGNORECASE)
+    return "\n".join(matches) if matches else "No extractable info found."
 
-
-def extract_safe_data(text):
-    """Extract non-sensitive data only"""
-    patterns = [
-        r"order\s*id[:\s]*([A-Z0-9\-]+)",
-        r"order\s*number[:\s]*([A-Z0-9\-]+)",
-        r"tracking\s*id[:\s]*([A-Z0-9\-]+)",
-        r"tracking\s*number[:\s]*([A-Z0-9\-]+)",
-        r"reference[:\s]*([A-Z0-9\-]+)",
-        r"status[:\s]*([a-zA-Z ]+)",
-    ]
-
-    results = []
-
-    for pattern in patterns:
-        matches = re.findall(pattern, text, re.IGNORECASE)
-        results.extend(matches)
-
-    return list(set(results))  # unique results
-
-
-def match_recipient(msg, target_email):
-    """Check if email was sent TO the target address"""
-    headers = ["To", "Delivered-To", "X-Original-To"]
-
-    for h in headers:
-        val = msg.get(h, "")
-        if target_email.lower() in val.lower():
-            return True
-    return False
-
-
-def fetch_latest_email(target_email):
+def get_latest_email(to_email):
+    """Connect to IMAP and get latest email sent to `to_email`."""
     try:
         mail = imaplib.IMAP4_SSL(IMAP_SERVER)
         mail.login(EMAIL_ACCOUNT, EMAIL_PASSWORD)
         mail.select("inbox")
-
+        # Search last 100 emails
         status, messages = mail.search(None, "ALL")
-        email_ids = messages[0].split()
-
-        # Limit to last 100 emails
-        email_ids = email_ids[-100:]
-
-        for eid in reversed(email_ids):
-            res, msg_data = mail.fetch(eid, "(RFC822)")
-            raw = msg_data[0][1]
-
-            msg = email.message_from_bytes(raw)
-
-            if match_recipient(msg, target_email):
-                text = extract_text(msg)
-                data = extract_safe_data(text)
-
-                return data if data else ["No relevant data found"]
-
-        return ["No matching email found"]
-
+        mail_ids = messages[0].split()
+        for mail_id in reversed(mail_ids[-100:]):
+            status, msg_data = mail.fetch(mail_id, "(RFC822)")
+            for response_part in msg_data:
+                if isinstance(response_part, tuple):
+                    msg = email.message_from_bytes(response_part[1])
+                    to_list = msg.get_all("To", []) + msg.get_all("Delivered-To", []) + msg.get_all("X-Original-To", [])
+                    to_list = [decode_header(addr)[0][0].decode() if isinstance(decode_header(addr)[0][0], bytes) else decode_header(addr)[0][0] for addr in to_list]
+                    if to_email in to_list:
+                        return extract_text_from_email(msg)
+        return "No email found for this address."
     except Exception as e:
-        return [f"Error: {str(e)}"]
+        return f"Error accessing mailbox: {e}"
 
-
-# ========= COMMANDS =========
-
+# ----------------------------
+# TELEGRAM HANDLERS
+# ----------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    add_user(user_id)
-
+    if await is_blocked(update.effective_user.id):
+        return
     await update.message.reply_text("Bot is running.")
-
 
 async def latest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    add_user(user_id)
-
-    if is_blocked(user_id):
-        return await update.message.reply_text("You are blocked.")
-
-    if not context.args:
-        return await update.message.reply_text("Usage: /latest email@example.com")
-
-    target_email = context.args[0].lower()
-
-    if not is_email_allowed(target_email):
-        return await update.message.reply_text("No account found")
-
-    result = fetch_latest_email(target_email)
-
-    await update.message.reply_text("\n".join(result))
-
-
-# ========= ADMIN COMMANDS =========
-
-async def users(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
+    if await is_blocked(user_id):
         return
 
-    user_list = users_col.find()
-    text = "\n".join(str(u["user_id"]) for u in user_list)
+    if len(context.args) != 1:
+        await update.message.reply_text("Usage: /latest user@domain.com")
+        return
 
-    await update.message.reply_text(text or "No users")
+    email_address = context.args[0]
+    if not await is_allowed_email(email_address):
+        await update.message.reply_text("No account found")
+        return
 
+    await update.message.reply_text("Searching latest email...")
+    result = get_latest_email(email_address)
+    await update.message.reply_text(result)
+
+# ----------------------------
+# ADMIN COMMANDS
+# ----------------------------
+async def users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    user_list = [str(u["user_id"]) for u in users_col.find()]
+    await update.message.reply_text("Users:\n" + "\n".join(user_list) if user_list else "No users found.")
 
 async def block(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
+    if update.effective_user.id != ADMIN_ID:
         return
-
-    uid = int(context.args[0])
-    blocked_col.insert_one({"user_id": uid})
-
-    await update.message.reply_text("Blocked")
-
+    if len(context.args) != 1:
+        await update.message.reply_text("Usage: /block user_id")
+        return
+    blocked_col.insert_one({"user_id": int(context.args[0])})
+    await update.message.reply_text(f"User {context.args[0]} blocked.")
 
 async def unblock(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
+    if update.effective_user.id != ADMIN_ID:
         return
-
-    uid = int(context.args[0])
-    blocked_col.delete_one({"user_id": uid})
-
-    await update.message.reply_text("Unblocked")
-
-
-async def add_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
+    if len(context.args) != 1:
+        await update.message.reply_text("Usage: /unblock user_id")
         return
+    blocked_col.delete_one({"user_id": int(context.args[0])})
+    await update.message.reply_text(f"User {context.args[0]} unblocked.")
 
-    email_addr = context.args[0].lower()
-    emails_col.insert_one({"email": email_addr})
-
-    await update.message.reply_text("Email added")
-
-
-async def remove_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
+async def addemail(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
         return
-
-    email_addr = context.args[0].lower()
-    emails_col.delete_one({"email": email_addr})
-
-    await update.message.reply_text("Email removed")
-
-
-async def list_emails(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
+    if len(context.args) != 1:
+        await update.message.reply_text("Usage: /addemail email")
         return
+    allowed_emails_col.insert_one({"email": context.args[0]})
+    await update.message.reply_text(f"Email {context.args[0]} added.")
 
-    emails = emails_col.find()
-    text = "\n".join(e["email"] for e in emails)
+async def removeemail(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    if len(context.args) != 1:
+        await update.message.reply_text("Usage: /removeemail email")
+        return
+    allowed_emails_col.delete_one({"email": context.args[0]})
+    await update.message.reply_text(f"Email {context.args[0]} removed.")
 
-    await update.message.reply_text(text or "No emails")
+async def emails(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    email_list = [e["email"] for e in allowed_emails_col.find()]
+    await update.message.reply_text("Allowed emails:\n" + "\n".join(email_list) if email_list else "No emails found.")
 
-
-# ========= MAIN =========
-
+# ----------------------------
+# MAIN FUNCTION
+# ----------------------------
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
+    # User commands
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("latest", latest))
 
+    # Admin commands
     app.add_handler(CommandHandler("users", users))
     app.add_handler(CommandHandler("block", block))
     app.add_handler(CommandHandler("unblock", unblock))
-    app.add_handler(CommandHandler("addemail", add_email))
-    app.add_handler(CommandHandler("removeemail", remove_email))
-    app.add_handler(CommandHandler("emails", list_emails))
+    app.add_handler(CommandHandler("addemail", addemail))
+    app.add_handler(CommandHandler("removeemail", removeemail))
+    app.add_handler(CommandHandler("emails", emails))
 
-    print("Bot running...")
+    # Run bot
     app.run_polling()
-
 
 if __name__ == "__main__":
     main()
-
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
-
-def dummy_server():
-    class Handler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"OK")
-
-    server = HTTPServer(("0.0.0.0", 10000), Handler)
-    server.serve_forever()
-
-threading.Thread(target=dummy_server).start()
